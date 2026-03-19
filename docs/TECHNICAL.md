@@ -10,6 +10,7 @@
 - [Package Structure](#package-structure)
 - [Architecture](#architecture)
 - [Data Model](#data-model)
+- [Database Layer](#database-layer)
 - [Data Flow](#data-flow)
 - [External Dependencies](#external-dependencies)
 - [Configuration Reference](#configuration-reference)
@@ -19,17 +20,15 @@
 
 ## Project Overview
 
-| Field | Value |
-|---|---|
-| Language | Go 1.26 · darwin/arm64 (Apple Silicon) |
-| Module | `github.com/jyotil-raval/media-shelf` |
+| Field                 | Value                                                  |
+| --------------------- | ------------------------------------------------------ |
+| Language              | Go 1.26 · darwin/arm64 (Apple Silicon)                 |
+| Module                | `github.com/jyotil-raval/media-shelf`                  |
 | External dependencies | `lib/pq v1.10.9` · `cobra v1.10.2` · `godotenv v1.5.1` |
-| Database | PostgreSQL 16 (via Docker) |
-| Status | Phase 1 complete |
+| Database              | PostgreSQL 16 (via Docker)                             |
+| Status                | Phase 2 complete                                       |
 
 **Purpose:** Local CLI tool to track anime — fetches data from MAL via `mal-updater`'s HTTP API, stores entries in a local PostgreSQL database, and provides offline-capable list, stats, and export commands.
-
-**Relationship to mal-updater:** `media-shelf` is a consumer of `mal-updater` (Project 1). It never calls the MAL API directly — all MAL data flows through `mal-updater`'s JWT-protected REST API.
 
 ---
 
@@ -40,19 +39,21 @@ media-shelf/
 ├── cmd/
 │   ├── main.go                  # Entry point — env, db, migrate, wire commands
 │   └── shelf/
-│       ├── add.go               # shelf add — fetch from MAL + store locally
-│       ├── list.go              # shelf list — filter + display
-│       ├── stats.go             # shelf stats — aggregations
-│       └── export.go            # shelf export — JSON + CSV
+│       ├── add.go               # shelf add
+│       ├── list.go              # shelf list
+│       ├── stats.go             # shelf stats
+│       └── export.go            # shelf export
 ├── internal/
 │   ├── config/
 │   │   └── constants.go         # All global constants
 │   ├── db/
-│   │   ├── db.go                # Store interface + PostgreSQLStore + error types
-│   │   ├── migrations.go        # Schema creation — IF NOT EXISTS guards
+│   │   ├── db.go                # Open() + ErrNotFound + ErrDuplicate
+│   │   ├── filter.go            # Filter struct for List() queries
+│   │   ├── store.go             # Store interface
+│   │   ├── postgres.go          # PostgreSQLStore implementation
 │   │   └── db_test.go           # Table-driven tests
 │   ├── models/
-│   │   └── media.go             # Shared MediaItem struct — imported by all packages
+│   │   └── media.go             # Shared MediaItem struct
 │   └── providers/
 │       └── mal/
 │           └── client.go        # Calls mal-updater HTTP API
@@ -70,14 +71,33 @@ media-shelf/
 
 ### Package Responsibilities
 
-| Package | Key Files | Responsibility |
-|---|---|---|
-| `cmd/main.go` | `main.go` | Entry point · env load · db open · migrate · wire Cobra commands |
-| `cmd/shelf` | `add, list, stats, export` | Cobra subcommands — thin wrappers over `App` methods |
-| `internal/models` | `media.go` | Shared `MediaItem` struct — imported by all packages, imports nothing |
-| `internal/db` | `db.go, migrations.go` | `Store` interface · `PostgreSQLStore` · error types · schema |
-| `internal/providers/mal` | `client.go` | HTTP client for `mal-updater` API — returns `models.MediaItem` |
-| `internal/config` | `constants.go` | All global constants |
+| Package                  | Key Files                                 | Responsibility                                           |
+| ------------------------ | ----------------------------------------- | -------------------------------------------------------- |
+| `cmd/main.go`            | `main.go`                                 | Entry point · env load · db open · migrate · wire Cobra  |
+| `cmd/shelf`              | `add, list, stats, export`                | Cobra subcommands — thin wrappers over `App` methods     |
+| `internal/models`        | `media.go`                                | Shared `MediaItem` struct — foundation, imports nothing  |
+| `internal/db`            | `db.go, filter.go, store.go, postgres.go` | Store interface · PostgreSQLStore · error types · Filter |
+| `internal/providers/mal` | `client.go`                               | HTTP client for `mal-updater` API                        |
+| `internal/config`        | `constants.go`                            | All global constants                                     |
+
+### Why the Store Interface Exists
+
+`App` depends on `db.Store` — not `*sql.DB` directly:
+
+```go
+type App struct {
+    store     db.Store      // interface — not tied to PostgreSQL
+    malClient *mal.Client
+}
+```
+
+**In production:** inject `PostgreSQLStore` — talks to real PostgreSQL.
+**In tests:** inject an in-memory mock — no disk, no Docker, microsecond execution.
+
+This is the Open-Closed Principle in practice:
+
+- Open for extension — swap PostgreSQL for any other database
+- Closed for modification — zero changes to commands, handlers, or tests
 
 ### Dependency Graph
 
@@ -85,35 +105,16 @@ media-shelf/
 cmd/main.go
     │
     ├── internal/db          ← Store interface + PostgreSQLStore
-    │       │
-    │       └── internal/models   ← MediaItem struct
+    │       └── internal/models
     │
     └── cmd/shelf/*          ← Cobra commands
-            │
             ├── internal/db
             ├── internal/models
-            └── internal/providers/mal  ← calls mal-updater
-                    │
+            └── internal/providers/mal
                     └── internal/models
 ```
 
-`internal/models` imports nothing inside this project — it is the foundation. Every other package imports `models`. No circular imports are possible in this graph.
-
-### Why `Store` Interface Over Direct `*sql.DB`
-
-`cmd/shelf/add.go` depends on `db.Store` — not `*sql.DB` directly:
-
-```go
-type App struct {
-    store     db.Store
-    malClient *mal.Client
-}
-```
-
-In production: `App` gets a real `PostgreSQLStore` backed by PostgreSQL.
-In tests: `App` gets an in-memory mock — no disk, no network, runs in microseconds.
-
-The Cobra command never knows which implementation it has. It calls `a.store.Add()` and trusts the contract.
+`internal/models` imports nothing inside this project. No circular imports possible.
 
 ### Architecture Diagram
 
@@ -137,9 +138,7 @@ The Cobra command never knows which implementation it has. It calls `a.store.Add
                        │                    │
                        ▼                    ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│   cmd/shelf/                                                     │
-│   App struct — store + malClient                                 │
-│                                                                  │
+│   cmd/shelf/ — App struct                                        │
 │   add.go    list.go    stats.go    export.go                     │
 └──────────────────────────────────────────────────────────────────┘
                        │
@@ -164,7 +163,7 @@ type MediaItem struct {
     SubType   string `json:"sub_type"   db:"sub_type"`   // tv | movie | ova | special
     Source    string `json:"source"     db:"source"`     // always "mal"
     SourceID  string `json:"source_id"  db:"source_id"`
-    Status    string `json:"status"     db:"status"`     // watching | completed | on_hold | dropped | plan_to
+    Status    string `json:"status"     db:"status"`
     Score     int    `json:"score"      db:"score"`
     Progress  int    `json:"progress"   db:"progress"`
     Total     int    `json:"total"      db:"total"`
@@ -178,9 +177,9 @@ type MediaItem struct {
 CREATE TABLE IF NOT EXISTS media_items (
     id          SERIAL       PRIMARY KEY,
     title       TEXT         NOT NULL,
-    media_type  TEXT         NOT NULL,   -- always "anime"
-    sub_type    TEXT,                    -- tv | movie | ova | special
-    source      TEXT         NOT NULL,   -- always "mal"
+    media_type  TEXT         NOT NULL,
+    sub_type    TEXT,
+    source      TEXT         NOT NULL,
     source_id   TEXT,
     status      TEXT         NOT NULL,
     score       INTEGER,
@@ -194,17 +193,89 @@ CREATE TABLE IF NOT EXISTS media_items (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_source ON media_items(source, source_id);
 ```
 
-### Design Decisions
+---
 
-**Single Table Inheritance** — all anime in one table regardless of subtype. The most common query is `WHERE status = 'watching'` — this works across the full shelf without JOINs or UNIONs.
+## Database Layer
 
-**`SubType` field** — handles anime movies, OVAs, and specials. An anime movie (`media_type: anime`, `sub_type: movie`) is distinct from a standalone movie (`media_type: movie`). This allows `shelf list --subtype movie` to return only anime films.
+### Error Types
 
-**UNIQUE INDEX on `(source, source_id)`** — deduplication enforced at the database level. Attempting to add the same MAL anime twice fails at the constraint — the application catches `ErrDuplicate` and returns a readable message.
+```go
+var (
+    ErrNotFound  = errors.New("not found")
+    ErrDuplicate = errors.New("duplicate entry")
+)
+```
 
-**`SERIAL` over `INTEGER PRIMARY KEY AUTOINCREMENT`** — PostgreSQL's `SERIAL` creates an implicit sequence (`media_items_id_seq`) and sets the column default to `nextval()`. Functionally identical to SQLite's `AUTOINCREMENT` but backed by a proper sequence object.
+Sentinel errors — always compared with `errors.Is()`, never `==`.
 
-**`TIMESTAMPTZ` over `DATETIME`** — PostgreSQL stores timestamps with timezone awareness. `DATETIME` in SQLite is a plain string with no timezone. `TIMESTAMPTZ` stores UTC internally and converts on read.
+### Filter Struct
+
+```go
+type Filter struct {
+    Status    string
+    MediaType string
+    SubType   string
+    MinScore  int
+    Sort      string // "title" | "score" | "updated_at"
+}
+```
+
+Zero value means no filters — `store.List(ctx, db.Filter{})` returns everything.
+
+### Store Interface
+
+```go
+type Store interface {
+    Add(ctx context.Context, item models.MediaItem) (int64, error)
+    GetByID(ctx context.Context, id int64) (*models.MediaItem, error)
+    List(ctx context.Context, filter Filter) ([]models.MediaItem, error)
+    Update(ctx context.Context, item models.MediaItem) error
+    Delete(ctx context.Context, id int64) error
+}
+```
+
+### PostgreSQLStore — Key Implementation Details
+
+**`RETURNING id` on insert:**
+
+```go
+query := `INSERT INTO media_items (...) VALUES (...) RETURNING id`
+err := s.db.QueryRowContext(ctx, query, ...).Scan(&id)
+```
+
+PostgreSQL returns the generated ID in the same statement — no second query needed.
+
+**Duplicate detection via `pq.Error` code `23505`:**
+
+```go
+var pqErr *pq.Error
+if errors.As(err, &pqErr) && pqErr.Code == "23505" {
+    return 0, fmt.Errorf("add item: %w", ErrDuplicate)
+}
+```
+
+`23505` is PostgreSQL's error code for unique constraint violation. Wrapping it as `ErrDuplicate` keeps the internal DB error from leaking to callers.
+
+**Dynamic WHERE clause with numbered placeholders:**
+
+```go
+argIdx := 1
+if filter.Status != "" {
+    conditions = append(conditions, fmt.Sprintf("status = $%d", argIdx))
+    args = append(args, filter.Status)
+    argIdx++
+}
+```
+
+PostgreSQL requires `$1`, `$2`, `$3` — not `?`. `argIdx` tracks the current placeholder number as conditions are added.
+
+**Compile-time interface assertion:**
+
+```go
+var _ Store = (*PostgreSQLStore)(nil)
+```
+
+Fails to build if `PostgreSQLStore` stops satisfying `Store`. Catches missing methods at the declaration site, not deep in application code.
 
 ---
 
@@ -231,10 +302,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_source ON media_items(source, source_id);
 │  3 · Store (internal/db)                             │
 │                                                      │
 │  store.Add(ctx, item)                                │
-│  INSERT INTO media_items ...                         │
+│  INSERT INTO media_items ... RETURNING id            │
 │                                                      │
-│  Duplicate? → ErrDuplicate → readable message        │
-│  Success?   → print confirmation                     │
+│  pq error 23505? → ErrDuplicate → readable message  │
+│  Success?         → return id                        │
 └──────────────────────┬──────────────────────────────┘
                        │
                        ▼
@@ -252,12 +323,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_source ON media_items(source, source_id);
 
 `http://localhost:8080` (configurable via `MAL_UPDATER_URL`)
 
-| Endpoint | Method | Auth | Purpose |
-|---|---|---|---|
-| `/anime/:id` | GET | JWT | Fetch full anime details |
-| `/anime/search` | GET | JWT | Search anime by query |
-
-JWT token stored in `.env` as `MAL_UPDATER_TOKEN` — issued once from `mal-updater`'s `POST /auth/token`.
+| Endpoint        | Method | Auth | Purpose                  |
+| --------------- | ------ | ---- | ------------------------ |
+| `/anime/:id`    | GET    | JWT  | Fetch full anime details |
+| `/anime/search` | GET    | JWT  | Search anime by query    |
 
 ### PostgreSQL
 
@@ -267,59 +336,58 @@ JWT token stored in `.env` as `MAL_UPDATER_TOKEN` — issued once from `mal-upda
 
 ## Configuration Reference
 
-Environment variables (`.env`):
-
-| Variable | Purpose |
-|---|---|
-| `DATABASE_URL` | PostgreSQL connection string |
-| `MAL_UPDATER_URL` | Base URL of `mal-updater` HTTP server |
-| `MAL_UPDATER_TOKEN` | JWT token for `mal-updater` API auth |
+| Variable            | Purpose                               |
+| ------------------- | ------------------------------------- |
+| `DATABASE_URL`      | PostgreSQL connection string          |
+| `MAL_UPDATER_URL`   | Base URL of `mal-updater` HTTP server |
+| `MAL_UPDATER_TOKEN` | JWT token for `mal-updater` API auth  |
 
 ---
 
 ## Critical Implementation Notes
 
 **PostgreSQL placeholder syntax**
-PostgreSQL uses `$1`, `$2`, `$3` for query parameters — not `?` like SQLite:
-```sql
--- WRONG (SQLite style)
-WHERE id = ?
+Use `$1`, `$2`, `$3` — not `?`:
 
--- CORRECT (PostgreSQL style)
-WHERE id = $1
+```sql
+WHERE id = $1  -- correct
+WHERE id = ?   -- wrong — SQLite syntax, fails in PostgreSQL
 ```
 
 **`db.Ping()` after `sql.Open()`**
-`sql.Open()` never connects — it only validates the driver name. `db.Ping()` forces an immediate connection attempt. Always call it at startup for network databases.
+`sql.Open()` never connects. `db.Ping()` forces a real connection attempt at startup.
 
 **`godotenv.Load()` is non-fatal**
-In Docker, `DATABASE_URL` is injected via environment — no `.env` file exists in the container. `godotenv.Load()` is called without error checking so the app starts cleanly in both local and container environments.
+In Docker, env vars are injected via environment — no `.env` file exists in the container.
 
 **`rows.Close()` is mandatory**
 Always `defer rows.Close()` immediately after a successful `QueryContext`. Leaving rows open leaks the connection back to the pool.
 
 **`rows.Err()` after the loop**
-`rows.Next()` returns `false` on both "no more rows" and "iterator error". Check `rows.Err()` after the loop to distinguish them:
+`rows.Next()` returns `false` on both "no more rows" and "iterator error". Always check `rows.Err()` after the loop to distinguish them:
+
 ```go
 for rows.Next() { ... }
-return stats, rows.Err()
+return items, rows.Err()
 ```
 
 **`errors.Is()` over `==` on wrapped errors**
-`fmt.Errorf("...: %w", err)` creates a new error value. `==` checks identity — always returns `false` on wrapped errors. Use `errors.Is()` to traverse the chain:
+
 ```go
-if errors.Is(err, db.ErrDuplicate) { ... }
+if errors.Is(err, db.ErrDuplicate) { ... }  // correct — traverses chain
+if err == db.ErrDuplicate { ... }            // wrong — fails on wrapped errors
 ```
 
 **No cgo — `lib/pq` is pure Go**
-Unlike `go-sqlite3`, `lib/pq` has no C dependency. No `gcc`, no `CGO_ENABLED=1`, standard `go build` works.
+No `gcc`, no `CGO_ENABLED=1`, standard `go build` works.
 
 **Docker volume persistence**
+
 ```bash
-docker compose down      # keeps postgres_data volume — data survives
-docker compose down -v   # deletes postgres_data volume — clean slate
+docker compose down      # keeps postgres_data — data survives
+docker compose down -v   # deletes postgres_data — clean slate
 ```
 
 ---
 
-*media-shelf · Technical Documentation · March 2026*
+_media-shelf · Technical Documentation · March 2026_

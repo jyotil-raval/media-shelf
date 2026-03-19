@@ -56,8 +56,7 @@ MAL_UPDATER_TOKEN=<jwt from mal-updater POST /auth/token>
 
 ```bash
 docker compose up -d
-# wait for healthy status
-docker compose ps
+docker compose ps   # wait for healthy
 ```
 
 ### Run
@@ -105,8 +104,10 @@ media-shelf/
 ├── internal/
 │   ├── config/              ← constants
 │   ├── db/
-│   │   ├── db.go            ← Store interface + SQLiteStore
-│   │   ├── migrations.go    ← schema creation
+│   │   ├── db.go            ← Open() + sentinel errors
+│   │   ├── filter.go        ← Filter struct
+│   │   ├── store.go         ← Store interface
+│   │   ├── postgres.go      ← PostgreSQLStore implementation
 │   │   └── db_test.go       ← table-driven tests
 │   ├── models/
 │   │   └── media.go         ← shared MediaItem struct
@@ -135,14 +136,14 @@ media-shelf/
 
 ## Phase Progress
 
-| Phase | Description                                                                | Status |
-| ----- | -------------------------------------------------------------------------- | ------ |
-| 1     | Project skeleton + PostgreSQL schema + Docker compose                      | ✅     |
-| 2     | Database layer — `Store` interface + `PostgreSQLStore` + `context.Context` | 🔜     |
-| 3     | Cobra CLI — `App` struct + all subcommands                                 | 🔜     |
-| 4     | MAL provider — calls `mal-updater` HTTP API                                | 🔜     |
-| 5     | Stats + Export — JSON and CSV                                              | 🔜     |
-| 6     | Table-driven tests                                                         | 🔜     |
+| Phase | Description                                                          | Status |
+| ----- | -------------------------------------------------------------------- | ------ |
+| 1     | Project skeleton + PostgreSQL schema + Docker compose                | ✅     |
+| 2     | Database layer — `Store` interface + `PostgreSQLStore` + error types | ✅     |
+| 3     | Cobra CLI — `App` struct + all subcommands                           | 🔜     |
+| 4     | MAL provider — calls `mal-updater` HTTP API                          | 🔜     |
+| 5     | Stats + Export — JSON and CSV                                        | 🔜     |
+| 6     | Table-driven tests                                                   | 🔜     |
 
 ---
 
