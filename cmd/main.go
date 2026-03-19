@@ -6,11 +6,12 @@ import (
 	"os"
 
 	"github.com/joho/godotenv"
+	"github.com/jyotil-raval/media-shelf/cmd/shelf"
 	"github.com/jyotil-raval/media-shelf/internal/db"
 )
 
 func main() {
-	godotenv.Load() // optional — .env present locally, injected by Docker in container
+	godotenv.Load()
 
 	connStr := os.Getenv("DATABASE_URL")
 	if connStr == "" {
@@ -27,5 +28,11 @@ func main() {
 		log.Fatalf("migration failed: %v", err)
 	}
 
-	log.Println("media-shelf ready.")
+	store := db.NewPostgreSQLStore(database)
+	app := shelf.NewApp(store)
+	root := shelf.NewRootCommand(app)
+
+	if err := root.Execute(); err != nil {
+		os.Exit(1)
+	}
 }
