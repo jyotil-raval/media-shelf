@@ -3,9 +3,16 @@ package db
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 
 	_ "github.com/lib/pq"
+)
+
+// Sentinel errors — compared with errors.Is(), never with ==
+var (
+	ErrNotFound  = errors.New("not found")
+	ErrDuplicate = errors.New("duplicate entry")
 )
 
 func Open(connStr string) (*sql.DB, error) {
