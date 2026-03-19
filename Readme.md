@@ -62,8 +62,7 @@ docker compose ps   # wait for healthy
 ### Run
 
 ```bash
-go run cmd/main.go
-# → media-shelf ready.
+go run cmd/main.go --help
 ```
 
 ---
@@ -79,6 +78,8 @@ shelf add --source mal --id 16498 --status completed
 shelf list
 shelf list --type tv --status watching
 shelf list --subtype movie
+shelf list --status completed --score 8
+shelf list --sort title
 
 # Stats
 shelf stats
@@ -97,6 +98,8 @@ media-shelf/
 ├── cmd/
 │   ├── main.go              ← entry point — wires everything
 │   └── shelf/
+│       ├── app.go           ← App struct + all command methods
+│       ├── root.go          ← Cobra root command
 │       ├── add.go           ← shelf add
 │       ├── list.go          ← shelf list
 │       ├── stats.go         ← shelf stats
@@ -128,7 +131,7 @@ media-shelf/
 
 - Go standard library — `database/sql`, `encoding/json`, `encoding/csv`, `net/http`
 - [`lib/pq`](https://github.com/lib/pq) — PostgreSQL driver (pure Go, no cgo)
-- [`cobra`](https://github.com/spf13/cobra) — CLI framework
+- [`cobra`](https://github.com/spf13/cobra) — CLI framework with subcommands
 - [`godotenv`](https://github.com/joho/godotenv) — `.env` file loading
 - [Docker](https://www.docker.com) — PostgreSQL via `postgres:16-alpine`
 
@@ -140,7 +143,7 @@ media-shelf/
 | ----- | -------------------------------------------------------------------- | ------ |
 | 1     | Project skeleton + PostgreSQL schema + Docker compose                | ✅     |
 | 2     | Database layer — `Store` interface + `PostgreSQLStore` + error types | ✅     |
-| 3     | Cobra CLI — `App` struct + all subcommands                           | 🔜     |
+| 3     | Cobra CLI — `App` struct + all subcommands wired                     | ✅     |
 | 4     | MAL provider — calls `mal-updater` HTTP API                          | 🔜     |
 | 5     | Stats + Export — JSON and CSV                                        | 🔜     |
 | 6     | Table-driven tests                                                   | 🔜     |

@@ -11,6 +11,7 @@
 - [Architecture](#architecture)
 - [Data Model](#data-model)
 - [Database Layer](#database-layer)
+- [CLI Layer](#cli-layer)
 - [Data Flow](#data-flow)
 - [External Dependencies](#external-dependencies)
 - [Configuration Reference](#configuration-reference)
@@ -26,7 +27,7 @@
 | Module                | `github.com/jyotil-raval/media-shelf`                  |
 | External dependencies | `lib/pq v1.10.9` · `cobra v1.10.2` · `godotenv v1.5.1` |
 | Database              | PostgreSQL 16 (via Docker)                             |
-| Status                | Phase 2 complete                                       |
+| Status                | Phase 3 complete                                       |
 
 **Purpose:** Local CLI tool to track anime — fetches data from MAL via `mal-updater`'s HTTP API, stores entries in a local PostgreSQL database, and provides offline-capable list, stats, and export commands.
 
@@ -39,6 +40,8 @@ media-shelf/
 ├── cmd/
 │   ├── main.go                  # Entry point — env, db, migrate, wire commands
 │   └── shelf/
+│       ├── app.go               # App struct + all command method stubs
+│       ├── root.go              # Cobra root command — registers subcommands
 │       ├── add.go               # shelf add
 │       ├── list.go              # shelf list
 │       ├── stats.go             # shelf stats
@@ -74,30 +77,39 @@ media-shelf/
 | Package                  | Key Files                                 | Responsibility                                           |
 | ------------------------ | ----------------------------------------- | -------------------------------------------------------- |
 | `cmd/main.go`            | `main.go`                                 | Entry point · env load · db open · migrate · wire Cobra  |
-| `cmd/shelf`              | `add, list, stats, export`                | Cobra subcommands — thin wrappers over `App` methods     |
+| `cmd/shelf/app.go`       | `app.go`                                  | App struct · dependency container · all command methods  |
+| `cmd/shelf`              | `root, add, list, stats, export`          | Cobra commands — thin wrappers over App methods          |
 | `internal/models`        | `media.go`                                | Shared `MediaItem` struct — foundation, imports nothing  |
 | `internal/db`            | `db.go, filter.go, store.go, postgres.go` | Store interface · PostgreSQLStore · error types · Filter |
 | `internal/providers/mal` | `client.go`                               | HTTP client for `mal-updater` API                        |
 | `internal/config`        | `constants.go`                            | All global constants                                     |
 
-### Why the Store Interface Exists
-
-`App` depends on `db.Store` — not `*sql.DB` directly:
+### Cobra Dependency Injection Pattern
 
 ```go
+// cmd/main.go — wiring
+store := db.NewPostgreSQLStore(database)   // real DB in production
+app   := shelf.NewApp(store)               // inject store into App
+root  := shelf.NewRootCommand(app)         // inject app into commands
+root.Execute()
+
+// cmd/shelf/app.go — App owns dependencies
 type App struct {
-    store     db.Store      // interface — not tied to PostgreSQL
-    malClient *mal.Client
+    store     db.Store       // interface — not tied to PostgreSQL
+    malClient *mal.Client    // added in Phase 4
+}
+
+// cmd/shelf/add.go — command is a thin closure wrapper
+RunE: func(cmd *cobra.Command, args []string) error {
+    return app.Add(cmd.Context(), source, id, status)
 }
 ```
 
-**In production:** inject `PostgreSQLStore` — talks to real PostgreSQL.
-**In tests:** inject an in-memory mock — no disk, no Docker, microsecond execution.
+`app` is captured by the closure — `RunE` never needs it in its signature. Each command independently testable by injecting a mock store into `App`.
 
-This is the Open-Closed Principle in practice:
+### Why `RunE` Over `Run`
 
-- Open for extension — swap PostgreSQL for any other database
-- Closed for modification — zero changes to commands, handlers, or tests
+`Run` ignores errors — a failed DB write silently exits with code `0`. `RunE` returns an `error` — Cobra prints it and exits with a non-zero code. Always use `RunE` for commands that can fail.
 
 ### Dependency Graph
 
@@ -107,14 +119,12 @@ cmd/main.go
     ├── internal/db          ← Store interface + PostgreSQLStore
     │       └── internal/models
     │
-    └── cmd/shelf/*          ← Cobra commands
+    └── cmd/shelf/*          ← Cobra commands via App
             ├── internal/db
             ├── internal/models
-            └── internal/providers/mal
+            └── internal/providers/mal  (Phase 4)
                     └── internal/models
 ```
-
-`internal/models` imports nothing inside this project. No circular imports possible.
 
 ### Architecture Diagram
 
@@ -125,7 +135,6 @@ cmd/main.go
 │  ┌──────────────────────────┐   ┌──────────────────────────┐    │
 │  │   mal-updater HTTP API   │   │   PostgreSQL (Docker)    │    │
 │  │   :8080                  │   │   :5432                  │    │
-│  │   GET /anime/:id         │   │   media_items table      │    │
 │  └──────────────┬───────────┘   └──────────────┬───────────┘    │
 └─────────────────┼────────────────────────────── ┼───────────────┘
                   │                               │
@@ -138,15 +147,20 @@ cmd/main.go
                        │                    │
                        ▼                    ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│   cmd/shelf/ — App struct                                        │
-│   add.go    list.go    stats.go    export.go                     │
+│   cmd/shelf/app.go — App struct                                  │
+│   Add()   List()   Stats()   Export()                            │
 └──────────────────────────────────────────────────────────────────┘
                        │
-                       ▼
-┌─────────────────────────────────────────────────────────────────┐
-│   cmd/main.go                                                    │
-│   Entry point · env · db · migrate · Cobra root command          │
-└──────────────────────────────────────────────────────────────────┘
+              ┌────────┴────────┐
+              ▼                 ▼
+┌─────────────────┐   ┌──────────────────────────────────────────┐
+│  cmd/shelf/     │   │  cmd/main.go                             │
+│  root.go        │   │  Entry point · wires store → app → cobra │
+│  add.go         │   └──────────────────────────────────────────┘
+│  list.go        │
+│  stats.go       │
+│  export.go      │
+└─────────────────┘
 ```
 
 ---
@@ -206,8 +220,6 @@ var (
 )
 ```
 
-Sentinel errors — always compared with `errors.Is()`, never `==`.
-
 ### Filter Struct
 
 ```go
@@ -219,8 +231,6 @@ type Filter struct {
     Sort      string // "title" | "score" | "updated_at"
 }
 ```
-
-Zero value means no filters — `store.List(ctx, db.Filter{})` returns everything.
 
 ### Store Interface
 
@@ -234,48 +244,46 @@ type Store interface {
 }
 ```
 
-### PostgreSQLStore — Key Implementation Details
+### PostgreSQLStore Key Details
 
-**`RETURNING id` on insert:**
+- `RETURNING id` on insert — one statement, no second query
+- `pq.Error` code `23505` → `ErrDuplicate`
+- Dynamic WHERE clause with `$1`, `$2` numbered placeholders
+- `rows.Close()` + `rows.Err()` on `List()`
+- `RowsAffected() == 0` → `ErrNotFound` on `Update()` and `Delete()`
+- `var _ Store = (*PostgreSQLStore)(nil)` — compile-time interface assertion
 
-```go
-query := `INSERT INTO media_items (...) VALUES (...) RETURNING id`
-err := s.db.QueryRowContext(ctx, query, ...).Scan(&id)
+---
+
+## CLI Layer
+
+### Command Structure
+
+```
+shelf
+├── add     --id (required) --status (required) --source (default: mal)
+├── list    --status --type --subtype --score --sort
+├── stats
+└── export  --format (default: json) --output (default: shelf.json)
 ```
 
-PostgreSQL returns the generated ID in the same statement — no second query needed.
+### Flag Binding Pattern
 
-**Duplicate detection via `pq.Error` code `23505`:**
+Cobra flags bind directly to local variables via `StringVar` / `IntVar`. The closure captures them by reference — by the time `RunE` executes, the flags are already populated:
 
 ```go
-var pqErr *pq.Error
-if errors.As(err, &pqErr) && pqErr.Code == "23505" {
-    return 0, fmt.Errorf("add item: %w", ErrDuplicate)
+var status string
+cmd.Flags().StringVar(&status, "status", "", "Watch status")
+
+RunE: func(cmd *cobra.Command, args []string) error {
+    // status is already set by Cobra before RunE runs
+    return app.List(cmd.Context(), db.Filter{Status: status})
 }
 ```
 
-`23505` is PostgreSQL's error code for unique constraint violation. Wrapping it as `ErrDuplicate` keeps the internal DB error from leaking to callers.
+### `cmd.Context()` Propagation
 
-**Dynamic WHERE clause with numbered placeholders:**
-
-```go
-argIdx := 1
-if filter.Status != "" {
-    conditions = append(conditions, fmt.Sprintf("status = $%d", argIdx))
-    args = append(args, filter.Status)
-    argIdx++
-}
-```
-
-PostgreSQL requires `$1`, `$2`, `$3` — not `?`. `argIdx` tracks the current placeholder number as conditions are added.
-
-**Compile-time interface assertion:**
-
-```go
-var _ Store = (*PostgreSQLStore)(nil)
-```
-
-Fails to build if `PostgreSQLStore` stops satisfying `Store`. Catches missing methods at the declaration site, not deep in application code.
+`RunE` passes `cmd.Context()` to every `App` method. This context carries the signal from OS interrupts (Ctrl+C). When the user cancels, the context is cancelled — any in-flight DB query or HTTP call respects it automatically.
 
 ---
 
@@ -305,13 +313,12 @@ Fails to build if `PostgreSQLStore` stops satisfying `Store`. Catches missing me
 │  INSERT INTO media_items ... RETURNING id            │
 │                                                      │
 │  pq error 23505? → ErrDuplicate → readable message  │
-│  Success?         → return id                        │
+│  Success?         → print confirmation               │
 └──────────────────────┬──────────────────────────────┘
                        │
                        ▼
 ┌─────────────────────────────────────────────────────┐
-│  Done                                                │
-│  ✓ Added: Death Note                                 │
+│  Done · ✓ Added: Death Note                          │
 └──────────────────────────────────────────────────────┘
 ```
 
@@ -347,45 +354,50 @@ Fails to build if `PostgreSQLStore` stops satisfying `Store`. Catches missing me
 ## Critical Implementation Notes
 
 **PostgreSQL placeholder syntax**
-Use `$1`, `$2`, `$3` — not `?`:
+Use `$1`, `$2` — not `?` (SQLite syntax):
 
 ```sql
 WHERE id = $1  -- correct
-WHERE id = ?   -- wrong — SQLite syntax, fails in PostgreSQL
+WHERE id = ?   -- wrong
 ```
 
 **`db.Ping()` after `sql.Open()`**
 `sql.Open()` never connects. `db.Ping()` forces a real connection attempt at startup.
 
 **`godotenv.Load()` is non-fatal**
-In Docker, env vars are injected via environment — no `.env` file exists in the container.
+In Docker, env vars are injected via environment — no `.env` file in container.
 
 **`rows.Close()` is mandatory**
-Always `defer rows.Close()` immediately after a successful `QueryContext`. Leaving rows open leaks the connection back to the pool.
+Always `defer rows.Close()` after a successful `QueryContext`.
 
 **`rows.Err()` after the loop**
-`rows.Next()` returns `false` on both "no more rows" and "iterator error". Always check `rows.Err()` after the loop to distinguish them:
 
 ```go
 for rows.Next() { ... }
 return items, rows.Err()
 ```
 
-**`errors.Is()` over `==` on wrapped errors**
+**`errors.Is()` over `==`**
 
 ```go
-if errors.Is(err, db.ErrDuplicate) { ... }  // correct — traverses chain
-if err == db.ErrDuplicate { ... }            // wrong — fails on wrapped errors
+if errors.Is(err, db.ErrDuplicate) { ... }  // correct
+if err == db.ErrDuplicate { ... }            // wrong on wrapped errors
 ```
 
+**Closure captures in Cobra commands**
+`RunE` captures `app` and flag variables from the enclosing `newXxxCommand()` function. This is how commands access the store without global state.
+
+**`RunE` over `Run`**
+`Run` ignores errors. `RunE` returns them. Always use `RunE`.
+
 **No cgo — `lib/pq` is pure Go**
-No `gcc`, no `CGO_ENABLED=1`, standard `go build` works.
+Standard `go build` — no C compiler needed.
 
 **Docker volume persistence**
 
 ```bash
-docker compose down      # keeps postgres_data — data survives
-docker compose down -v   # deletes postgres_data — clean slate
+docker compose down      # data preserved
+docker compose down -v   # clean slate
 ```
 
 ---
