@@ -9,3 +9,10 @@ type Filter struct {
 	MinScore  int
 	Sort      string // "title" | "score" | "updated_at"
 }
+
+// StatRow holds a single aggregated result
+type StatRow struct {
+	SubType string
+	Status  string
+	Count   int
+}

@@ -2,7 +2,11 @@ package shelf
 
 import (
 	"context"
+	"encoding/csv"
+	"encoding/json"
 	"fmt"
+	"os"
+	"strconv"
 
 	"github.com/jyotil-raval/media-shelf/internal/db"
 	"github.com/jyotil-raval/media-shelf/internal/providers/mal"
@@ -56,11 +60,73 @@ func (a *App) List(ctx context.Context, filter db.Filter) error {
 }
 
 func (a *App) Stats(ctx context.Context) error {
-	fmt.Println("TODO: stats")
+	stats, err := a.store.Stats(ctx)
+	if err != nil {
+		return fmt.Errorf("fetching stats: %w", err)
+	}
+
+	if len(stats) == 0 {
+		fmt.Println("Your shelf is empty.")
+		return nil
+	}
+
+	fmt.Printf("%-12s %-14s %s\n", "Type", "Status", "Count")
+	fmt.Println("----------------------------------------")
+
+	total := 0
+	for _, row := range stats {
+		fmt.Printf("%-12s %-14s %d\n", row.SubType, row.Status, row.Count)
+		total += row.Count
+	}
+
+	fmt.Printf("----------------------------------------\n")
+	fmt.Printf("%-12s %-14s %d\n", "", "Total", total)
 	return nil
 }
 
 func (a *App) Export(ctx context.Context, format, output string) error {
-	fmt.Printf("TODO: export as %s to %s\n", format, output)
+	items, err := a.store.List(ctx, db.Filter{})
+	if err != nil {
+		return fmt.Errorf("fetching items: %w", err)
+	}
+
+	file, err := os.Create(output)
+	if err != nil {
+		return fmt.Errorf("creating file: %w", err)
+	}
+	defer file.Close()
+
+	switch format {
+	case "json":
+		enc := json.NewEncoder(file)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(items); err != nil {
+			return fmt.Errorf("encoding json: %w", err)
+		}
+	case "csv":
+		w := csv.NewWriter(file)
+		defer w.Flush()
+
+		// header row
+		w.Write([]string{"id", "title", "media_type", "sub_type", "source", "status", "score", "progress", "total"})
+
+		for _, item := range items {
+			w.Write([]string{
+				strconv.FormatInt(item.ID, 10),
+				item.Title,
+				item.MediaType,
+				item.SubType,
+				item.Source,
+				item.Status,
+				strconv.Itoa(item.Score),
+				strconv.Itoa(item.Progress),
+				strconv.Itoa(item.Total),
+			})
+		}
+	default:
+		return fmt.Errorf("unsupported format: %s (use json or csv)", format)
+	}
+
+	fmt.Printf("✓ Exported %d items to %s\n", len(items), output)
 	return nil
 }

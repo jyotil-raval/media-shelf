@@ -13,4 +13,5 @@ type Store interface {
 	List(ctx context.Context, filter Filter) ([]models.MediaItem, error)
 	Update(ctx context.Context, item models.MediaItem) error
 	Delete(ctx context.Context, id int64) error
+	Stats(ctx context.Context) ([]StatRow, error)
 }

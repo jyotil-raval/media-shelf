@@ -1,0 +1,28 @@
+[
+  {
+    "id": 2,
+    "title": "Shingeki no Kyojin",
+    "media_type": "anime",
+    "sub_type": "tv",
+    "source": "mal",
+    "source_id": "16498",
+    "status": "completed",
+    "score": 0,
+    "progress": 0,
+    "total": 25,
+    "notes": ""
+  },
+  {
+    "id": 1,
+    "title": "Death Note",
+    "media_type": "anime",
+    "sub_type": "tv",
+    "source": "mal",
+    "source_id": "1535",
+    "status": "watching",
+    "score": 0,
+    "progress": 0,
+    "total": 37,
+    "notes": ""
+  }
+]

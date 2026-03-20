@@ -185,3 +185,28 @@ func (s *PostgreSQLStore) Delete(ctx context.Context, id int64) error {
 
 	return nil
 }
+
+func (s *PostgreSQLStore) Stats(ctx context.Context) ([]StatRow, error) {
+	query := `
+		SELECT COALESCE(sub_type, 'unknown'), status, COUNT(*)
+		FROM media_items
+		GROUP BY sub_type, status
+		ORDER BY sub_type, status`
+
+	rows, err := s.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("stats query: %w", err)
+	}
+	defer rows.Close()
+
+	var stats []StatRow
+	for rows.Next() {
+		var row StatRow
+		if err := rows.Scan(&row.SubType, &row.Status, &row.Count); err != nil {
+			return nil, fmt.Errorf("scanning stat row: %w", err)
+		}
+		stats = append(stats, row)
+	}
+
+	return stats, rows.Err()
+}
