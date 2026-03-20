@@ -12,6 +12,7 @@
 - [Data Model](#data-model)
 - [Database Layer](#database-layer)
 - [CLI Layer](#cli-layer)
+- [gRPC Integration](#grpc-integration)
 - [Data Flow](#data-flow)
 - [External Dependencies](#external-dependencies)
 - [Configuration Reference](#configuration-reference)
@@ -21,15 +22,15 @@
 
 ## Project Overview
 
-| Field                 | Value                                                  |
-| --------------------- | ------------------------------------------------------ |
-| Language              | Go 1.26 · darwin/arm64 (Apple Silicon)                 |
-| Module                | `github.com/jyotil-raval/media-shelf`                  |
-| External dependencies | `lib/pq v1.10.9` · `cobra v1.10.2` · `godotenv v1.5.1` |
-| Database              | PostgreSQL 16 (via Docker)                             |
-| Status                | Phase 3 complete                                       |
+| Field                 | Value                                                                                                    |
+| --------------------- | -------------------------------------------------------------------------------------------------------- |
+| Language              | Go 1.26 · darwin/arm64 (Apple Silicon)                                                                   |
+| Module                | `github.com/jyotil-raval/media-shelf`                                                                    |
+| External dependencies | `lib/pq v1.10.9` · `cobra v1.10.2` · `godotenv v1.5.1` · `mal-updater v1.1.0` · `google.golang.org/grpc` |
+| Database              | PostgreSQL 16 (via Docker)                                                                               |
+| Status                | Phase 4 complete                                                                                         |
 
-**Purpose:** Local CLI tool to track anime — fetches data from MAL via `mal-updater`'s HTTP API, stores entries in a local PostgreSQL database, and provides offline-capable list, stats, and export commands.
+**Purpose:** Local CLI tool to track anime — fetches data from MAL via `mal-updater`'s gRPC `AnimeService`, stores entries in a local PostgreSQL database, and provides offline-capable list, stats, and export commands.
 
 ---
 
@@ -38,20 +39,20 @@
 ```
 media-shelf/
 ├── cmd/
-│   ├── main.go                  # Entry point — env, db, migrate, wire commands
+│   ├── main.go                  # Entry point — env, db, gRPC client, cobra
 │   └── shelf/
-│       ├── app.go               # App struct + all command method stubs
-│       ├── root.go              # Cobra root command — registers subcommands
+│       ├── app.go               # App struct + Add(), List(), Stats(), Export()
+│       ├── root.go              # Cobra root command
 │       ├── add.go               # shelf add
 │       ├── list.go              # shelf list
 │       ├── stats.go             # shelf stats
 │       └── export.go            # shelf export
 ├── internal/
 │   ├── config/
-│   │   └── constants.go         # All global constants
+│   │   └── constants.go
 │   ├── db/
 │   │   ├── db.go                # Open() + ErrNotFound + ErrDuplicate
-│   │   ├── filter.go            # Filter struct for List() queries
+│   │   ├── filter.go            # Filter struct
 │   │   ├── store.go             # Store interface
 │   │   ├── postgres.go          # PostgreSQLStore implementation
 │   │   └── db_test.go           # Table-driven tests
@@ -59,11 +60,11 @@ media-shelf/
 │   │   └── media.go             # Shared MediaItem struct
 │   └── providers/
 │       └── mal/
-│           └── client.go        # Calls mal-updater HTTP API
+│           └── client.go        # gRPC client → mal-updater AnimeService
 ├── docs/
-├── .env                         # gitignored
+├── .env
 ├── .env.example
-├── docker-compose.yml           # postgres:16-alpine + named volume
+├── docker-compose.yml           # postgres:16-alpine
 ├── go.mod
 └── go.sum
 ```
@@ -74,93 +75,75 @@ media-shelf/
 
 ### Package Responsibilities
 
-| Package                  | Key Files                                 | Responsibility                                           |
-| ------------------------ | ----------------------------------------- | -------------------------------------------------------- |
-| `cmd/main.go`            | `main.go`                                 | Entry point · env load · db open · migrate · wire Cobra  |
-| `cmd/shelf/app.go`       | `app.go`                                  | App struct · dependency container · all command methods  |
-| `cmd/shelf`              | `root, add, list, stats, export`          | Cobra commands — thin wrappers over App methods          |
-| `internal/models`        | `media.go`                                | Shared `MediaItem` struct — foundation, imports nothing  |
-| `internal/db`            | `db.go, filter.go, store.go, postgres.go` | Store interface · PostgreSQLStore · error types · Filter |
-| `internal/providers/mal` | `client.go`                               | HTTP client for `mal-updater` API                        |
-| `internal/config`        | `constants.go`                            | All global constants                                     |
+| Package                  | Key Files                                 | Responsibility                                      |
+| ------------------------ | ----------------------------------------- | --------------------------------------------------- |
+| `cmd/main.go`            | `main.go`                                 | Entry point · env · db · gRPC client · cobra wiring |
+| `cmd/shelf/app.go`       | `app.go`                                  | App struct · store + malClient · command methods    |
+| `cmd/shelf`              | `root, add, list, stats, export`          | Cobra commands — thin closures over App methods     |
+| `internal/models`        | `media.go`                                | Shared `MediaItem` struct — imports nothing         |
+| `internal/db`            | `db.go, filter.go, store.go, postgres.go` | Store interface · PostgreSQLStore · error types     |
+| `internal/providers/mal` | `client.go`                               | gRPC client for `mal-updater` AnimeService          |
 
-### Cobra Dependency Injection Pattern
+### App Struct — Two Dependencies
 
 ```go
-// cmd/main.go — wiring
-store := db.NewPostgreSQLStore(database)   // real DB in production
-app   := shelf.NewApp(store)               // inject store into App
-root  := shelf.NewRootCommand(app)         // inject app into commands
-root.Execute()
-
-// cmd/shelf/app.go — App owns dependencies
 type App struct {
-    store     db.Store       // interface — not tied to PostgreSQL
-    malClient *mal.Client    // added in Phase 4
-}
-
-// cmd/shelf/add.go — command is a thin closure wrapper
-RunE: func(cmd *cobra.Command, args []string) error {
-    return app.Add(cmd.Context(), source, id, status)
+    store     db.Store      // PostgreSQL via Store interface
+    malClient *mal.Client   // gRPC client → mal-updater :9090
 }
 ```
 
-`app` is captured by the closure — `RunE` never needs it in its signature. Each command independently testable by injecting a mock store into `App`.
-
-### Why `RunE` Over `Run`
-
-`Run` ignores errors — a failed DB write silently exits with code `0`. `RunE` returns an `error` — Cobra prints it and exits with a non-zero code. Always use `RunE` for commands that can fail.
+`store` is an interface — swappable for tests. `malClient` is a concrete gRPC client — connects to `mal-updater` on startup and reuses the connection for all calls.
 
 ### Dependency Graph
 
 ```
 cmd/main.go
     │
-    ├── internal/db          ← Store interface + PostgreSQLStore
+    ├── internal/db              ← Store + PostgreSQLStore
     │       └── internal/models
     │
-    └── cmd/shelf/*          ← Cobra commands via App
+    ├── internal/providers/mal   ← gRPC client
+    │       └── mal-updater/proto/animepb  ← imported from mal-updater@v1.1.0
+    │
+    └── cmd/shelf/*              ← Cobra commands
             ├── internal/db
             ├── internal/models
-            └── internal/providers/mal  (Phase 4)
-                    └── internal/models
+            └── internal/providers/mal
 ```
 
 ### Architecture Diagram
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│  External                                                        │
-│                                                                  │
-│  ┌──────────────────────────┐   ┌──────────────────────────┐    │
-│  │   mal-updater HTTP API   │   │   PostgreSQL (Docker)    │    │
-│  │   :8080                  │   │   :5432                  │    │
-│  └──────────────┬───────────┘   └──────────────┬───────────┘    │
-└─────────────────┼────────────────────────────── ┼───────────────┘
-                  │                               │
-                  ▼                               ▼
-┌─────────────────────────────────────────────────────────────────┐
-│   internal/providers/mal          internal/db                   │
-│   Client.GetAnime(id)             Store interface                │
-│   → models.MediaItem              PostgreSQLStore                │
-└──────────────────────┬────────────────────┬────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│  External Services                                                   │
+│                                                                      │
+│  ┌───────────────────────────────┐   ┌──────────────────────────┐   │
+│  │   mal-updater (Docker)        │   │   PostgreSQL (Docker)    │   │
+│  │   gRPC AnimeService  :9090    │   │   :5432                  │   │
+│  │   HTTP REST API      :8080    │   │   media_items table      │   │
+│  └──────────────┬────────────────┘   └──────────────┬───────────┘   │
+└─────────────────┼────────────────────────────────── ┼───────────────┘
+                  │ protobuf (binary)                  │ SQL
+                  ▼                                    ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│   internal/providers/mal              internal/db                   │
+│   mal.Client                          Store interface                │
+│   → grpc.AnimeService.GetAnime()      PostgreSQLStore                │
+│   → models.MediaItem                                                 │
+└──────────────────────┬────────────────────┬────────────────────────┘
                        │                    │
                        ▼                    ▼
-┌─────────────────────────────────────────────────────────────────┐
-│   cmd/shelf/app.go — App struct                                  │
-│   Add()   List()   Stats()   Export()                            │
-└──────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│   cmd/shelf/app.go — App{store, malClient}                           │
+│   Add()   List()   Stats()   Export()                                │
+└──────────────────────────────────────────────────────────────────────┘
                        │
-              ┌────────┴────────┐
-              ▼                 ▼
-┌─────────────────┐   ┌──────────────────────────────────────────┐
-│  cmd/shelf/     │   │  cmd/main.go                             │
-│  root.go        │   │  Entry point · wires store → app → cobra │
-│  add.go         │   └──────────────────────────────────────────┘
-│  list.go        │
-│  stats.go       │
-│  export.go      │
-└─────────────────┘
+                       ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│   cmd/main.go — Entry point                                          │
+│   db.Open() → db.Migrate() → mal.NewClient() → NewApp() → Execute() │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -246,12 +229,11 @@ type Store interface {
 
 ### PostgreSQLStore Key Details
 
-- `RETURNING id` on insert — one statement, no second query
+- `RETURNING id` on insert
 - `pq.Error` code `23505` → `ErrDuplicate`
-- Dynamic WHERE clause with `$1`, `$2` numbered placeholders
+- Dynamic WHERE with `$1`, `$2` numbered placeholders
 - `rows.Close()` + `rows.Err()` on `List()`
-- `RowsAffected() == 0` → `ErrNotFound` on `Update()` and `Delete()`
-- `var _ Store = (*PostgreSQLStore)(nil)` — compile-time interface assertion
+- `var _ Store = (*PostgreSQLStore)(nil)` — compile-time assertion
 
 ---
 
@@ -267,23 +249,84 @@ shelf
 └── export  --format (default: json) --output (default: shelf.json)
 ```
 
-### Flag Binding Pattern
+### Dependency Injection via Closures
 
-Cobra flags bind directly to local variables via `StringVar` / `IntVar`. The closure captures them by reference — by the time `RunE` executes, the flags are already populated:
+`RunE` captures `app` from the enclosing constructor function:
 
 ```go
-var status string
-cmd.Flags().StringVar(&status, "status", "", "Watch status")
-
-RunE: func(cmd *cobra.Command, args []string) error {
-    // status is already set by Cobra before RunE runs
-    return app.List(cmd.Context(), db.Filter{Status: status})
+func newAddCommand(app *App) *cobra.Command {
+    var id, status, source string
+    return &cobra.Command{
+        RunE: func(cmd *cobra.Command, args []string) error {
+            return app.Add(cmd.Context(), source, id, status) // app captured
+        },
+    }
 }
 ```
 
-### `cmd.Context()` Propagation
+No global state. Every command testable by injecting a mock `App`.
 
-`RunE` passes `cmd.Context()` to every `App` method. This context carries the signal from OS interrupts (Ctrl+C). When the user cancels, the context is cancelled — any in-flight DB query or HTTP call respects it automatically.
+---
+
+## gRPC Integration
+
+### Why gRPC over HTTP for Service-to-Service
+
+|                 | HTTP (REST)              | gRPC                               |
+| --------------- | ------------------------ | ---------------------------------- |
+| Format          | JSON — human readable    | Protobuf — binary, smaller         |
+| Contract        | Implicit                 | Explicit `.proto` file             |
+| Code generation | Manual                   | `protoc` generates client + server |
+| Best for        | User-facing, curl, Bruno | Service-to-service                 |
+
+### Proto Contract
+
+`media-shelf` imports `mal-updater@v1.1.0` to get the generated proto code:
+
+```go
+import pb "github.com/jyotil-raval/mal-updater/proto/animepb"
+```
+
+The contract is defined in `mal-updater/proto/anime.proto`:
+
+```protobuf
+service AnimeService {
+    rpc GetAnime(GetAnimeRequest) returns (AnimeResponse);
+    rpc Search(SearchAnimeRequest) returns (SearchAnimeResponse);
+    rpc GetList(GetListRequest) returns (GetListResponse);
+}
+```
+
+### Client Implementation
+
+```go
+type Client struct {
+    conn  *grpc.ClientConn
+    anime pb.AnimeServiceClient
+}
+
+func NewClient(target string) (*Client, error) {
+    conn, err := grpc.NewClient(target,
+        grpc.WithTransportCredentials(insecure.NewCredentials()),
+    )
+    // ...
+    return &Client{
+        conn:  conn,
+        anime: pb.NewAnimeServiceClient(conn),
+    }, nil
+}
+
+func (c *Client) GetAnime(ctx context.Context, id string) (*models.MediaItem, error) {
+    resp, err := c.anime.GetAnime(ctx, &pb.GetAnimeRequest{Id: id})
+    // map AnimeResponse → models.MediaItem
+}
+```
+
+**`insecure.NewCredentials()`** — plaintext TCP for local development. In production use TLS credentials.
+
+**Connection reuse** — the gRPC connection is established once at startup in `cmd/main.go` and shared for all calls. HTTP/2 multiplexing means multiple RPC calls share the same TCP connection efficiently.
+
+**`defer malClient.Close()`** — always close the gRPC connection on exit to release the TCP socket.
 
 ---
 
@@ -292,33 +335,30 @@ RunE: func(cmd *cobra.Command, args []string) error {
 ```
 ┌─────────────────────────────────────────────────────┐
 │  1 · CLI Start                                       │
-│  shelf add --source mal --id 1535 --status watching  │
+│  go run cmd/main.go add --id 1535 --status watching  │
 │  Cobra parses flags → App.Add(ctx, source, id, ...)  │
 └──────────────────────┬──────────────────────────────┘
                        │
                        ▼
 ┌─────────────────────────────────────────────────────┐
-│  2 · Fetch from MAL (internal/providers/mal)         │
+│  2 · Fetch from MAL via gRPC                         │
 │                                                      │
-│  GET mal-updater:8080/anime/1535                     │
-│  Authorization: Bearer <MAL_UPDATER_TOKEN>           │
-│  → models.MediaItem                                  │
+│  malClient.GetAnime(ctx, "1535")                     │
+│  → AnimeService.GetAnime on mal-updater:9090         │
+│  ← AnimeResponse (protobuf binary)                   │
+│  → mapped to models.MediaItem                        │
 └──────────────────────┬──────────────────────────────┘
                        │
                        ▼
 ┌─────────────────────────────────────────────────────┐
 │  3 · Store (internal/db)                             │
 │                                                      │
+│  item.Status = "watching"                            │
 │  store.Add(ctx, item)                                │
 │  INSERT INTO media_items ... RETURNING id            │
 │                                                      │
-│  pq error 23505? → ErrDuplicate → readable message  │
-│  Success?         → print confirmation               │
-└──────────────────────┬──────────────────────────────┘
-                       │
-                       ▼
-┌─────────────────────────────────────────────────────┐
-│  Done · ✓ Added: Death Note                          │
+│  pq 23505? → ErrDuplicate → readable message         │
+│  Success?  → ✓ Added [1]: Death Note (tv)            │
 └──────────────────────────────────────────────────────┘
 ```
 
@@ -326,53 +366,69 @@ RunE: func(cmd *cobra.Command, args []string) error {
 
 ## External Dependencies
 
-### mal-updater HTTP API
+### mal-updater gRPC
 
-`http://localhost:8080` (configurable via `MAL_UPDATER_URL`)
+`localhost:9090` (configurable via `MAL_UPDATER_GRPC_URL`)
 
-| Endpoint        | Method | Auth | Purpose                  |
-| --------------- | ------ | ---- | ------------------------ |
-| `/anime/:id`    | GET    | JWT  | Fetch full anime details |
-| `/anime/search` | GET    | JWT  | Search anime by query    |
+| RPC        | Request                | Purpose                  |
+| ---------- | ---------------------- | ------------------------ |
+| `GetAnime` | `{id: "1535"}`         | Fetch full anime details |
+| `Search`   | `{q: "naruto"}`        | Search anime             |
+| `GetList`  | `{status: "watching"}` | Get user's MAL list      |
 
 ### PostgreSQL
 
-`postgres:16-alpine` running via Docker Compose on port `5432`.
+`postgres:16-alpine` via Docker Compose on port `5432`.
 
 ---
 
 ## Configuration Reference
 
-| Variable            | Purpose                               |
-| ------------------- | ------------------------------------- |
-| `DATABASE_URL`      | PostgreSQL connection string          |
-| `MAL_UPDATER_URL`   | Base URL of `mal-updater` HTTP server |
-| `MAL_UPDATER_TOKEN` | JWT token for `mal-updater` API auth  |
+| Variable               | Purpose                                                       |
+| ---------------------- | ------------------------------------------------------------- |
+| `DATABASE_URL`         | PostgreSQL connection string                                  |
+| `MAL_UPDATER_GRPC_URL` | gRPC target address (default: `localhost:9090`)               |
+| `MAL_UPDATER_URL`      | HTTP base URL (kept for future use)                           |
+| `MAL_UPDATER_TOKEN`    | JWT token (not used by gRPC client — no auth interceptor yet) |
 
 ---
 
 ## Critical Implementation Notes
 
-**PostgreSQL placeholder syntax**
-Use `$1`, `$2` — not `?` (SQLite syntax):
+**PostgreSQL `$1` placeholder syntax**
 
 ```sql
-WHERE id = $1  -- correct
-WHERE id = ?   -- wrong
+WHERE id = $1  -- correct (PostgreSQL)
+WHERE id = ?   -- wrong (SQLite syntax)
 ```
 
-**`db.Ping()` after `sql.Open()`**
-`sql.Open()` never connects. `db.Ping()` forces a real connection attempt at startup.
+**`db.Ping()` forces connection at startup**
+`sql.Open()` never connects. `db.Ping()` validates the connection immediately.
 
-**`godotenv.Load()` is non-fatal**
-In Docker, env vars are injected via environment — no `.env` file in container.
-
-**`rows.Close()` is mandatory**
-Always `defer rows.Close()` after a successful `QueryContext`.
-
-**`rows.Err()` after the loop**
+**gRPC connection lifecycle**
 
 ```go
+malClient, err := mal.NewClient(grpcTarget)  // establish once
+defer malClient.Close()                       // release on exit
+```
+
+**gRPC has no auth interceptor yet**
+The gRPC server accepts all connections without authentication. Production would use gRPC interceptors (equivalent of HTTP middleware) to validate tokens.
+
+**`float64` from proto numeric fields**
+`AnimeResponse.NumEpisodes` is `int32` in proto — cast directly:
+
+```go
+Total: int(resp.NumEpisodes)
+```
+
+**Import path for proto code**
+`media-shelf` imports the generated proto from `mal-updater` as a versioned module dependency — not a local copy. Upgrading `mal-updater` requires a `go get` bump.
+
+**`rows.Close()` and `rows.Err()`**
+
+```go
+defer rows.Close()
 for rows.Next() { ... }
 return items, rows.Err()
 ```
@@ -380,24 +436,7 @@ return items, rows.Err()
 **`errors.Is()` over `==`**
 
 ```go
-if errors.Is(err, db.ErrDuplicate) { ... }  // correct
-if err == db.ErrDuplicate { ... }            // wrong on wrapped errors
-```
-
-**Closure captures in Cobra commands**
-`RunE` captures `app` and flag variables from the enclosing `newXxxCommand()` function. This is how commands access the store without global state.
-
-**`RunE` over `Run`**
-`Run` ignores errors. `RunE` returns them. Always use `RunE`.
-
-**No cgo — `lib/pq` is pure Go**
-Standard `go build` — no C compiler needed.
-
-**Docker volume persistence**
-
-```bash
-docker compose down      # data preserved
-docker compose down -v   # clean slate
+if errors.Is(err, db.ErrDuplicate) { ... }
 ```
 
 ---
