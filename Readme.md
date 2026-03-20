@@ -96,6 +96,9 @@ go run cmd/main.go stats
 # Export
 go run cmd/main.go export --format json --output shelf.json
 go run cmd/main.go export --format csv  --output shelf.csv
+
+# Run tests (no Docker required)
+go test ./internal/... -v
 ```
 
 ### Sample Output

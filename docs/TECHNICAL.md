@@ -393,6 +393,92 @@ func (c *Client) GetAnime(ctx context.Context, id string) (*models.MediaItem, er
 
 ---
 
+---
+
+## Testing
+
+### Philosophy
+
+`media-shelf` uses a `MockStore` — an in-memory implementation of the `Store` interface — for all tests. This means:
+
+- No Docker required to run tests
+- No real PostgreSQL connection
+- Tests run in milliseconds (~0.5s for 11 tests)
+- Each test gets a fresh store — no shared state between tests
+
+This is the Store interface payoff: `PostgreSQLStore` and `MockStore` satisfy the same interface. The application code never knows which one it's talking to.
+
+### MockStore
+
+```go
+type MockStore struct {
+    mu    sync.Mutex
+    items map[int64]models.MediaItem
+    next  int64
+}
+```
+
+An in-memory map protected by a mutex. Implements all `Store` methods — `Add`, `GetByID`, `List`, `Update`, `Delete`, `Stats`. Duplicate detection mirrors the real DB constraint: same `source` + `source_id` = `ErrDuplicate`.
+
+### Table-Driven Test Pattern
+
+```go
+tests := []struct {
+    name    string
+    item    models.MediaItem
+    wantErr error
+}{
+    {"valid anime",           validItem,     nil},
+    {"duplicate entry",       duplicateItem, ErrDuplicate},
+    {"different source ID",   differentItem, nil},
+}
+
+store := NewMockStore()
+for _, tt := range tests {
+    t.Run(tt.name, func(t *testing.T) {
+        _, err := store.Add(ctx, tt.item)
+        if err != tt.wantErr {
+            t.Errorf("Add() error = %v, wantErr = %v", err, tt.wantErr)
+        }
+    })
+}
+```
+
+Adding a new test case = adding one struct to the slice. No new function, no duplicated setup.
+
+`t.Run` creates a named sub-test — run a single case with:
+
+```bash
+go test ./internal/db/... -run TestMockStore_Add/duplicate_entry
+```
+
+### `t.Fatal` vs `t.Error`
+
+| Function   | Behaviour                       | Use when                                             |
+| ---------- | ------------------------------- | ---------------------------------------------------- |
+| `t.Errorf` | Marks failed, continues         | Subsequent assertions are still meaningful           |
+| `t.Fatalf` | Marks failed, stops immediately | Continuing would panic or produce meaningless output |
+
+```go
+items, err := store.List(ctx, tt.filter)
+if err != nil {
+    t.Fatalf("List() unexpected error: %v", err) // stop — can't check len(nil)
+}
+if len(items) != tt.wantCount {
+    t.Errorf("List() got %d, want %d", len(items), tt.wantCount) // continue
+}
+```
+
+### Run Tests
+
+```bash
+go test ./internal/...        # all packages
+go test ./internal/db/... -v  # verbose — shows each sub-test
+go test ./internal/db/... -run TestMockStore_List  # single test
+```
+
+---
+
 ## Critical Implementation Notes
 
 **PostgreSQL `$1` placeholder syntax**
