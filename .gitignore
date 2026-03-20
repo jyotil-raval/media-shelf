@@ -1,4 +1,5 @@
 # .gitignore
 .env
-shelf.dbshelf.json
+shelf.db
+shelf.json
 shelf.csv

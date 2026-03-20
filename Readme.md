@@ -90,12 +90,34 @@ go run cmd/main.go list --subtype movie
 go run cmd/main.go list --status completed --score 8
 go run cmd/main.go list --sort title
 
-# Stats
+# Stats — grouped by type and status
 go run cmd/main.go stats
 
 # Export
 go run cmd/main.go export --format json --output shelf.json
 go run cmd/main.go export --format csv  --output shelf.csv
+```
+
+### Sample Output
+
+**stats:**
+
+```
+Type         Status         Count
+----------------------------------------
+tv           completed      1
+tv           watching       1
+----------------------------------------
+             Total          2
+```
+
+**export --format json:**
+
+```json
+[
+  { "id": 1, "title": "Death Note", "sub_type": "tv", "status": "watching", "total": 37 },
+  { "id": 2, "title": "Shingeki no Kyojin", "sub_type": "tv", "status": "completed", "total": 25 }
+]
 ```
 
 ---
@@ -114,11 +136,11 @@ media-shelf/
 │       ├── stats.go         ← shelf stats
 │       └── export.go        ← shelf export
 ├── internal/
-│   ├── config/              ← constants
+│   ├── config/
 │   ├── db/
 │   │   ├── db.go            ← Open() + sentinel errors
-│   │   ├── filter.go        ← Filter struct
-│   │   ├── store.go         ← Store interface
+│   │   ├── filter.go        ← Filter + StatRow structs
+│   │   ├── store.go         ← Store interface (inc. Stats)
 │   │   ├── postgres.go      ← PostgreSQLStore implementation
 │   │   └── db_test.go       ← table-driven tests
 │   ├── models/
@@ -156,7 +178,7 @@ media-shelf/
 | 2     | Database layer — `Store` interface + `PostgreSQLStore` + error types | ✅     |
 | 3     | Cobra CLI — `App` struct + all subcommands wired                     | ✅     |
 | 4     | MAL provider — gRPC client → `mal-updater` AnimeService              | ✅     |
-| 5     | Stats + Export — JSON and CSV                                        | 🔜     |
+| 5     | Stats + Export — JSON and CSV                                        | ✅     |
 | 6     | Table-driven tests                                                   | 🔜     |
 
 ---

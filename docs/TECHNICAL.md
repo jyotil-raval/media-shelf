@@ -442,3 +442,53 @@ if errors.Is(err, db.ErrDuplicate) { ... }
 ---
 
 _media-shelf · Technical Documentation · March 2026_
+
+---
+
+## Stats + Export
+
+### Stats Query
+
+```go
+SELECT COALESCE(sub_type, 'unknown'), status, COUNT(*)
+FROM media_items
+GROUP BY sub_type, status
+ORDER BY sub_type, status
+```
+
+`COALESCE` handles `NULL` sub_type values — returns `'unknown'` instead of `NULL` so the output is always readable.
+
+`StatRow` holds each aggregated result:
+
+```go
+type StatRow struct {
+    SubType string
+    Status  string
+    Count   int
+}
+```
+
+### Export — `io.Writer` Pattern
+
+Both `json.NewEncoder` and `csv.NewWriter` accept any `io.Writer`. `*os.File` implements `io.Writer`. This means one file handle works for both formats — no duplication:
+
+```go
+file, _ := os.Create(output)
+defer file.Close()
+
+switch format {
+case "json":
+    enc := json.NewEncoder(file)
+    enc.SetIndent("", "  ")
+    enc.Encode(items)
+case "csv":
+    w := csv.NewWriter(file)
+    defer w.Flush()
+    w.Write([]string{"id", "title", ...}) // header
+    for _, item := range items {
+        w.Write([]string{...})
+    }
+}
+```
+
+`csv.Writer.Flush()` must be called — it buffers writes internally and only flushes to the underlying `io.Writer` on `Flush()`. Without it, the file may be incomplete.
